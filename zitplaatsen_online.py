@@ -1,4 +1,4 @@
-# app_streamlit.py
+# zitplaatsen_online.py
 import streamlit as st
 from PIL import Image
 from pdf2image import convert_from_bytes
@@ -9,6 +9,16 @@ from reportlab.lib.utils import ImageReader
 import io, os, math, json, zipfile, shutil, tempfile, random
 
 st.set_page_config(page_title="Zitplaatsen", layout="wide")
+
+# --------------------------
+# Safe helper for rerun (some Streamlit envs may not expose experimental_rerun)
+# --------------------------
+def try_rerun():
+    try:
+        st.experimental_rerun()
+    except Exception:
+        # not available or failed — just continue (page will update on next interaction)
+        return
 
 # =========================
 # PDF CROP-PARAMETERS (exacte waarden gebruikt door desktop)
@@ -41,7 +51,7 @@ FONT_MAX = 12
 FONT_MIN = 7
 
 # =========================
-# Layouts definitie (gebruik jouw concrete list)
+# Layouts definitie (je kan hier toevoegen/wijzigen)
 # =========================
 LAYOUTS = {
     "Type 1 (T107) — 5 rijen × 3 banken × 2 stoelen (lange klas)": {
@@ -118,7 +128,7 @@ def parse_pattern_text(raw: str):
     return pattern
 
 # -------------------------
-# Helpers + session_state init
+# Session state initialization
 # -------------------------
 def ensure_state():
     if "students" not in st.session_state:
@@ -138,7 +148,6 @@ ensure_state()
 
 # -------------------------
 # Compute base geometry (same math as desktop)
-# Returns base_slots (list) and base_bank_rects
 # -------------------------
 def compute_base_geometry(layout_name):
     cfg = LAYOUTS.get(layout_name, LAYOUTS[list(LAYOUTS.keys())[0]])
@@ -271,7 +280,6 @@ if layout_choice != st.session_state.layout_name:
 # Custom layout popup-like inputs
 if st.sidebar.button("Eigen opstelling instellen"):
     st.sidebar.info("Vul hieronder je eigen opstelling (regelmatig of patroon).")
-    # show fields
     regular = st.sidebar.radio("Regulier of onregelmatig?", ("Regulier", "Onregelmatig"))
     if regular == "Regulier":
         rows = st.sidebar.number_input("Rijen:", min_value=1, max_value=12, value=4, key="custom_rows")
@@ -287,7 +295,8 @@ if st.sidebar.button("Eigen opstelling instellen"):
             LAYOUTS["Eigen opstelling"] = {"regular": False, "pattern": pattern, "orientation": orient, "center_first_row": True}
         except Exception as e:
             st.sidebar.error(f"Patroon fout: {e}")
-    st.experimental_rerun()
+    # use safe rerun so it won't crash on older streamlit versions
+    try_rerun()
 
 # Upload images (multiple) or PDF
 st.sidebar.markdown("---")
@@ -296,10 +305,10 @@ import_method = st.sidebar.radio("Bron", ("Losse afbeeldingen", "Smartschool PDF
 if import_method == "Losse afbeeldingen":
     uploaded = st.sidebar.file_uploader("Upload afbeeldingen (meerdere)", accept_multiple_files=True, type=["jpg","jpeg","png"])
     if uploaded:
-        # prompt names
         default_names = [os.path.splitext(f.name)[0] for f in uploaded]
         names_text = st.sidebar.text_area("Namen (één per regel) — optioneel. Laat leeg = bestandsnamen", value="\n".join(default_names))
         names = [ln.strip() for ln in names_text.splitlines() if ln.strip()]
+        # Add each uploaded file
         for i, f in enumerate(uploaded):
             try:
                 pil = Image.open(io.BytesIO(f.read())).convert("RGB")
@@ -308,7 +317,7 @@ if import_method == "Losse afbeeldingen":
             name = names[i] if i < len(names) else os.path.splitext(f.name)[0]
             add_student_from_pil(pil, name=name)
         st.sidebar.success(f"{len(uploaded)} foto's toegevoegd.")
-        st.experimental_rerun()
+        try_rerun()
 else:
     pdf_file = st.sidebar.file_uploader("Upload Smartschool PDF (1e pagina wordt gebruikt)", type=["pdf"])
     if pdf_file is not None:
@@ -316,7 +325,7 @@ else:
         try:
             pages = convert_from_bytes(raw, dpi=PDF_DPI)
             page = pages[0].convert("RGB")
-            st.sidebar.image(page, caption="PDF preview (pagina 1)", use_column_width=True)
+            st.sidebar.image(page, caption="PDF preview (pagina 1)", use_container_width=True)
             N = st.sidebar.number_input("Aantal leerlingen op de PDF", min_value=1, max_value=200, value=10)
             names_text = st.sidebar.text_area("Namen (één per regel) — optioneel. Laat leeg = leerling_1..N", value="\n".join([f"leerling_{i+1}" for i in range(int(N))]))
             names = [ln.strip() for ln in names_text.splitlines() if ln.strip()]
@@ -341,7 +350,7 @@ else:
                         "img_filename": None
                     })
                 st.sidebar.success(f"{int(N)} foto's uit PDF toegevoegd.")
-                st.experimental_rerun()
+                try_rerun()
         except Exception as e:
             st.sidebar.error(f"PDF lezen mislukt: {e}")
 
@@ -349,23 +358,22 @@ else:
 st.sidebar.markdown("---")
 if st.sidebar.button("Shuffle"):
     random.shuffle(st.session_state.students)
-    # reassign
     for i, s in enumerate(st.session_state.students):
         s["slot"] = i if i < len(st.session_state.base_slots) else None
-    st.experimental_rerun()
+    try_rerun()
 
 # Save / Load seating (JSON + zip of images)
 def save_seating_to_file():
     if not st.session_state.students:
         st.sidebar.warning("Geen leerlingen om op te slaan.")
         return
-    # create temp dir
     tmp = tempfile.mkdtemp()
     assets_dir = os.path.join(tmp, "assets")
     os.makedirs(assets_dir, exist_ok=True)
     students_meta = []
     for i, s in enumerate(st.session_state.students):
-        fname = f"{i}_{s['name'].replace(' ','_')}.png"
+        safe_name = s['name'].replace(' ','_')
+        fname = f"{i}_{safe_name}.png"
         p = os.path.join(assets_dir, fname)
         try:
             s["pil"].save(p, format="PNG")
@@ -386,7 +394,6 @@ def save_seating_to_file():
         "custom_layout": LAYOUTS.get("Eigen opstelling"),
         "students": students_meta
     }
-    # write json and zip assets
     json_path = os.path.join(tmp, "seating.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -443,7 +450,7 @@ if upload_seating is not None:
                     "img_filename": imgfile
                 })
             auto_assign_students_to_slots()
-            st.experimental_rerun()
+            try_rerun()
 
 # -------------------------
 # Main area: compute geometry if not present
@@ -500,14 +507,12 @@ def on_click_slot(idx):
 
 # -------------------------
 # Rendering the layout visually in columns
-# We create rows; for each bank we create a mini-column with seats inline
 # -------------------------
 st.title("Zitplaatsen — Web (Streamlit)")
 
 col1, col2 = st.columns([3,1])
 with col1:
     st.subheader("Opstelling")
-    # we'll render rows using st.columns; create a visual representation
     cfg = LAYOUTS.get(st.session_state.layout_name)
     regular = cfg.get("regular", True)
     if regular:
@@ -520,21 +525,7 @@ with col1:
         banks_per_row = [len(row) for row in pattern]
         def seats_lookup(r,c): return pattern[r][c]
 
-    for r in range(rows):
-        # determine widths: create column placeholders per bank with spaces between
-        row_banks = banks_per_row[r]
-        bank_contents = []
-        for b in range(row_banks):
-            seats = seats_lookup(r,b) if not regular else cfg["seats"]
-            # build a small column for this bank: seats horizontally inside
-            cols = st.columns(seats)
-            for s_i in range(seats):
-                # compute the global slot index: it's the same ordering as base_slots
-                # find the slot index corresponding to (r,b,s_i)
-                # we can compute it by iterating base_slots until we reach the match ordinal
-                # simpler: keep a counter
-                pass
-    # to map row/bank/seat -> base_slots index, rebuild mapping
+    # build mapping row/bank/seat -> slot index
     mapping = []
     idx = 0
     for r in range(rows):
@@ -545,16 +536,14 @@ with col1:
                 idx += 1
 
     # Render by rows using mapping
-    current = 0
     for r in range(rows):
         banks = [m for m in mapping if m[0]==r]
-        # create streamlit columns for the entire row: one column per seat but we want spacing between banks
-        # we will create as many columns as number of seats in row, rendering separators by empty columns
         seats_in_row = sum(seats_lookup(r,c) if not regular else cfg["seats"] for c in range(banks_per_row[r]))
-        cols = st.columns(seats_in_row + (banks_per_row[r]-1))  # rough: add separators slots
+        # create columns for seats plus small spacer columns between banks
+        total_cols = seats_in_row + max(0, banks_per_row[r]-1)
+        cols = st.columns(total_cols)
         col_idx = 0
-        bank_counter = 0
-        # iterate banks
+        current = 0
         for b in range(banks_per_row[r]):
             seats = seats_lookup(r,b) if not regular else cfg["seats"]
             for s_i in range(seats):
@@ -562,62 +551,54 @@ with col1:
                 si, s = student_at_slot(slot_index)
                 with cols[col_idx]:
                     if s:
-                        # highlight if selected
                         selected = (st.session_state.selected_slot == slot_index)
-                        st.image(s["pil"], use_column_width=True)
+                        st.image(s["pil"], use_container_width=True)
                         if selected:
                             st.markdown(f"**{s['name']}** ✅")
                         else:
                             st.markdown(f"**{s['name']}**")
                         if st.button("Select / Swap", key=f"sel_{slot_index}"):
                             on_click_slot(slot_index)
-                            st.experimental_rerun()
+                            try_rerun()
                         if st.button("Bewerk naam", key=f"edit_{slot_index}"):
                             new = st.text_input("Nieuwe naam", value=s["name"], key=f"ni_{slot_index}")
                             if st.button("OK", key=f"ok_{slot_index}"):
                                 s["name"] = new
-                                st.experimental_rerun()
+                                try_rerun()
                         if st.button("Verwijder", key=f"del_{slot_index}"):
                             st.session_state.students.pop(si)
-                            st.experimental_rerun()
+                            try_rerun()
                     else:
-                        st.image(Image.new("RGB",(100,100),(240,240,240)), use_column_width=True)
+                        st.image(Image.new("RGB",(100,100),(240,240,240)), use_container_width=True)
                         st.markdown("_leeg_")
                         if st.button("Select / Swap", key=f"sel_{slot_index}"):
                             on_click_slot(slot_index)
-                            st.experimental_rerun()
+                            try_rerun()
                 current += 1
                 col_idx += 1
-            # add separator column if there is space
-            if bank_counter < banks_per_row[r]-1:
-                # try to place an empty spacer column
+            # spacer column
+            if b < banks_per_row[r]-1:
                 if col_idx < len(cols):
                     with cols[col_idx]:
                         st.write("")  # spacer
                     col_idx += 1
-                bank_counter += 1
 
 with col2:
     st.subheader("Acties")
     st.write("Geselecteerde plek:", st.session_state.selected_slot)
     if st.button("Reset selectie"):
         st.session_state.selected_slot = None
-        st.experimental_rerun()
+        try_rerun()
     st.markdown("---")
     st.write("Leerlingen aantal:", len(st.session_state.students))
     if st.session_state.students:
-        sel_idx = None
-        if st.button("Verplaats lege naar eerstvolgende lege plek"):
-            # reassign sequentially based on students order
-            free = [i for i in range(len(st.session_state.base_slots)) if all(s.get("slot") != i for s in st.session_state.students)]
-            for s_i, s in enumerate(st.session_state.students):
-                if s_i < len(st.session_state.base_slots):
-                    s["slot"] = s_i
-            st.experimental_rerun()
+        if st.button("Herstart sequentiële toewijzing"):
+            for i, s in enumerate(st.session_state.students):
+                s["slot"] = i if i < len(st.session_state.base_slots) else None
+            try_rerun()
 
     st.markdown("---")
     if st.button("Exporteer naar PDF"):
-        # create PDF in memory
         cfg = LAYOUTS.get(st.session_state.layout_name)
         page = portrait(A4) if cfg.get("orientation","portrait")=="portrait" else landscape(A4)
         W,H = page
@@ -656,3 +637,4 @@ with col2:
         st.download_button("Download PDF", data=packet.getvalue(), file_name=f"{st.session_state.get('class_name','klas')}_{st.session_state.get('room_name','lokaal')}.pdf", mime="application/pdf")
 
 st.caption("Tip: klik op 'Select / Swap' op een leerling en daarna op de doelplek om te wisselen. Gebruik 'Eigen opstelling' om zelf een patroon in te voeren.")
+
